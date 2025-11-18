@@ -1,109 +1,120 @@
-name: Clay → Apify → Clay (scalable + minimal payload)
+name: Run Apify Scraper → Send to Clay (One Row Per Request)
 
 on:
   workflow_dispatch:
     inputs:
-      countryCode: { type: string, default: "us" }
-      deeperCityScrape: { type: string, default: "true" }
-      language: { type: string, default: "en" }
-      skipClosedPlaces: { type: string, default: "true" }
-      searchMatching: { type: string, default: "ALL" }
-      placeMinimumStars: { type: string, default: "threeAndHalf" }
-      website: { type: string, default: "require" }
-      locationQuery: { type: string, required: true }
-      maxCrawledPlacesPerSearch: { type: string, default: "50" }
-      searchStringsArray: { type: string, default: "Christmas market" }
+      countryCode:
+        type: string
+        required: true
+      deeperCityScrape:
+        type: boolean
+        default: false
+      language:
+        type: string
+        default: en
+      locationQuery:
+        type: string
+        required: true
+      maxCrawledPlacesPerSearch:
+        type: string
+        default: "100"
+      searchStringsArray:
+        type: string
+        required: true
+        description: "Comma-separated, e.g. plumber,roofing contractor"
+      skipClosedPlaces:
+        type: boolean
+        default: true
+      searchMatching:
+        type: choice
+        options: [ANY, ALL]
+        default: ANY
+      placeMinimumStars:
+        type: choice
+        description: "Minimum rating (Apify format)"
+        options:
+          - ""
+          - one
+          - oneAndHalf
+          - two
+          - twoAndHalf
+          - three
+          - threeAndHalf
+          - four
+          - fourAndHalf
+          - fourAndThreeQuarters
+          - five
+        default: ""
+      website:
+        type: choice
+        options: ["", require, prefer]
+        default: ""
 
 jobs:
-  scrape:
+  scrape-and-send:
     runs-on: ubuntu-latest
-    env:
-      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-      CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK }}
-
     steps:
-      - name: Create Apify input.json
+      - uses: actions/checkout@v4
+
+      - name: Build input.json
         env:
-          LOC: ${{ inputs.locationQuery }}
-          MAX: ${{ inputs.maxCrawledPlacesPerSearch }}
-          TERMS: ${{ inputs.searchStringsArray }}
+          COUNTRY_CODE: ${{ inputs.countryCode }}
+          DEEPER_CITY: ${{ inputs.deeperCityScrape }}
+          LANGUAGE: ${{ inputs.language }}
+          LOCATION: ${{ inputs.locationQuery }}
+          MAX_PLACES: ${{ inputs.maxCrawledPlacesPerSearch }}
+          SEARCH_STRINGS: ${{ inputs.searchStringsArray }}
+          SKIP_CLOSED: ${{ inputs.skipClosedPlaces }}
+          SEARCH_MATCHING: ${{ inputs.searchMatching }}
+          MIN_STARS: ${{ inputs.placeMinimumStars }}
+          WEBSITE_FILTER: ${{ inputs.website }}
         run: |
-          SEARCH_ARRAY=$(echo "$TERMS" | jq -R 'split(",") | map(select(length>0) | gsub("^\\s+|\\s+$";""))')
-          cat > input.json << EOF
+          IFS=',' read -ra ARR <<< "$SEARCH_STRINGS"
+          SEARCH_JSON=$(printf '%s\n' "${ARR[@]}" | jq -R . | jq -s -c .)
+
+          cat << EOF > input.json
           {
-            "countryCode": "us",
-            "deeperCityScrape": true,
-            "language": "en",
-            "locationQuery": "$LOC",
-            "maxCrawledPlacesPerSearch": ${MAX:-50},
-            "searchStringsArray": $SEARCH_ARRAY,
-            "skipClosedPlaces": true,
-            "searchMatching": "all",
-            "placeMinimumStars": "threeAndHalf",
-            "website": "withWebsite",
-            "memoryMbytes": 8192
+            "countryCode": "$COUNTRY_CODE",
+            "deeperCityScrape": $DEEPER_CITY,
+            "language": "$LANGUAGE",
+            "locationQuery": "$LOCATION",
+            "maxCrawledPlacesPerSearch": $MAX_PLACES,
+            "searchStringsArray": $SEARCH_JSON,
+            "skipClosedPlaces": $SKIP_CLOSED,
+            "searchMatching": "$SEARCH_MATCHING",
+            "placeMinimumStars": "$MIN_STARS",
+            "website": "$WEBSITE_FILTER"
           }
           EOF
+          echo "input.json ready"
+          cat input.json | jq .
 
-      - name: Run Apify actor
+      - name: Run Apify (sync)
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
-          RUN_JSON=$(curl -s -X POST \
-            "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN" \
+          curl -f -X POST \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=8192" \
             -H "Content-Type: application/json" \
-            --data @input.json)
+            --data @input.json \
+            -o results.json
 
-          RUN_ID=$(echo "$RUN_JSON" | jq -r '.data.id')
-          DATASET_ID=$(echo "$RUN_JSON" | jq -r '.data.defaultDatasetId')
+          COUNT=$(jq '. | length' results.json)
+          echo "Apify returned $COUNT places"
 
-          while true; do
-            STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" | jq -r '.data.status')
-            echo "Status: $STATUS"
-            [[ "$STATUS" == "SUCCEEDED" ]] && break
-            [[ "$STATUS" == "FAILED" || "$STATUS" == "ABORTED" ]] && exit 1
-            sleep 7
-          done
-
-          curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN" \
-            > full-results.json
-
-      - name: Send fields to Clay in batches
+      - name: Send each place as a separate row to Clay
+        env:
+          CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
         run: |
-          jq 'map({
-            title,
-            url,
-            placeId,
-            categoryName,
-            website,
-            cid,
-            address,
-            street,
-            city,
-            postalCode,
-            state,
-            phone,
-            reviewsCount,
-            totalScore,
-            price,
-            permanentlyClosed,
-            openingHours,
-            scrapedAt
-          })' full-results.json > minimal.json
+          echo "Sending rows one-by-one to Clay..."
 
-          TOTAL=$(jq 'length' minimal.json)
-          echo "Sending $TOTAL places (only required fields) in batches of 60…"
-
-          jq -c '.[]' minimal.json | split -l 60 - batch_
-
-          SENT=0
-          for file in batch_*; do
-            jq -s . "$file" > payload.json
-            curl -X POST "$CLAY_WEBHOOK_URL" \
+          jq -c '.[]' results.json | while read -r row; do
+            echo "$row" | curl -X POST "$CLAY_WEBHOOK" \
               -H "Content-Type: application/json" \
-              --data @payload.json
-            SENT=$((SENT + $(jq 'length' payload.json)))
-            echo "Sent batch → $SENT/$TOTAL"
-            rm "$file" payload.json
-            sleep 0.8
+              -d @- 
+            
+            # Be gentle with Clay's rate limits (Clay allows ~30–50 req/sec, 10/sec is safe)
+            sleep 0.1
           done
 
-          echo "SUCCESS → All $TOTAL rows added to Clay"
+          echo "All rows successfully sent to Clay as individual rows!"
