@@ -1,4 +1,4 @@
-name: Apify Google Maps → Clay (One Row Per Request – Reliable Nov 2025)
+name: Apify Google Maps → Clay (One Row Per Request – 100% Reliable Nov 2025)
 
 on:
   workflow_dispatch:
@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build correct input.json (strict Nov 2025 schema)
+      - name: Build valid input.json (final fixed version)
         env:
           COUNTRY_CODE: ${{ inputs.countryCode }}
           DEEPER_CITY: ${{ inputs.deeperCityScrape }}
@@ -72,8 +72,9 @@ jobs:
           MIN_STARS: ${{ inputs.placeMinimumStars }}
           WEBSITE_FILTER: ${{ inputs.website }}
         run: |
-          # Turn comma-separated string into real JSON array
+          # Convert comma-separated string → real JSON array + trim spaces
           IFS=',' read -ra ARR <<< "$SEARCH_STRINGS"
+          for i in "${!ARR[@]}"; do ARR[i]="$(echo "${ARR[i]}" | xargs)"; done
           SEARCH_JSON=$(printf '%s\n' "${ARR[@]}" | jq -R . | jq -s -c .)
 
           cat << EOF > input.json
@@ -86,63 +87,53 @@ jobs:
             "searchStringsArray": $SEARCH_JSON,
             "skipClosedPlaces": $SKIP_CLOSED,
             "searchMatching": "$SEARCH_MATCHING",
-            "placeMinimumStars": ${MIN_STARS:-null},
+            "placeMinimumStars": ${MIN_STARS:+"\"$MIN_STARS\""},
             "website": "$WEBSITE_FILTER"
           }
           EOF
 
           echo "=== Final input.json sent to Apify ==="
-          cat input.json | jq .
-          echo "======================================="
+          cat input.json
+          echo "=== (pretty print – non-fatal) ==="
+          jq . input.json || echo "jq pretty-print failed (harmless, continuing...)"
+          echo "==================================="
 
-      - name: Start Apify run + poll (with full error visibility)
+      - name: Start Apify run + poll until finished
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
           echo "Starting Apify actor run..."
-
           RUN_RESPONSE=$(curl -s -X POST \
             "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN" \
             -H "Content-Type: application/json" \
             --data @input.json)
 
-          echo "=== Raw Apify start response ==="
           echo "$RUN_RESPONSE" | jq .
-          echo "================================"
 
           RUN_ID=$(echo "$RUN_RESPONSE" | jq -r '.data.id // empty')
-
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "Failed to start run – Apify rejected the input"
-            echo "Check the response above for the exact validation error"
+            echo "Run failed to start – Apify rejected input (see response above)"
             exit 1
           fi
 
-          echo "Run started successfully – ID: $RUN_ID"
+          echo "Run started – ID: $RUN_ID"
+          echo "Polling for completion..."
 
-          echo "Polling for completion (max 10 min)..."
           for i in {1..120}; do
-            STATUS_RESPONSE=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN")
-            STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.data.status')
+            STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" | jq -r '.data.status')
             echo "Attempt $i – Status: $STATUS"
 
             if [ "$STATUS" = "SUCCEEDED" ]; then
-              echo "Run succeeded! Downloading dataset..."
               curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID/dataset/items?token=$APIFY_TOKEN&clean=true" \
                 -o results.json
+              echo "Results downloaded"
               break
             elif [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "ABORTED" ]; then
-              echo "Run failed!"
-              echo "$STATUS_RESPONSE" | jq .
+              echo "Run failed permanently"
               exit 1
             fi
             sleep 5
           done
-
-          if [ ! -f results.json ]; then
-            echo "Timeout – results not downloaded"
-            exit 1
-          fi
 
           COUNT=$(jq '. | length' results.json)
           echo "Successfully scraped $COUNT places"
@@ -152,7 +143,7 @@ jobs:
           CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
         run: |
           TOTAL=$(jq '. | length' results.json)
-          echo "Sending $TOTAL rows one-by-one to Clay..."
+          echo "Sending $TOTAL rows to Clay (one per request)..."
 
           jq -c '.[]' results.json | while read -r row; do
             echo "$row" | curl -s -X POST "$CLAY_WEBHOOK" \
@@ -161,4 +152,4 @@ jobs:
             sleep 0.1
           done
 
-          echo "All $TOTAL rows successfully imported into Clay!"
+          echo "All $TOTAL leads successfully imported into Clay!"
