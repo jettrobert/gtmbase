@@ -1,0 +1,46 @@
+name: Run Apify Scraper and Send to Clay
+
+on:
+  workflow_dispatch:
+    inputs:
+      scraper_input:
+        description: "JSON input for Apify actor"
+        required: true
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run scraper
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
+          INPUT_JSON: ${{ github.event.inputs.scraper_input }}
+        run: |
+          echo "📡 Starting Apify scrape..."
+
+          # Create temp file for JSON input
+          echo "$INPUT_JSON" > input.json
+          cat input.json
+
+          echo "🚀 Triggering Apify actor..."
+          curl -s -X POST \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=4096" \
+            -H "Content-Type: application/json" \
+            --data @input.json \
+            -o results.json
+
+          echo "📥 Apify results:"
+          cat results.json
+
+          echo "📤 Sending results to Clay webhook..."
+          curl -s -X POST "$CLAY_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            --data @results.json
+
+          echo "🎉 Done!"
