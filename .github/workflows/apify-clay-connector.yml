@@ -1,9 +1,36 @@
 name: Clay → Apify Google Maps → Back to Clay
 
-# This trigger is what Clay uses when you add "Run workflow" as an enrichment
 on:
   workflow_dispatch:
     inputs:
+      countryCode:
+        required: false
+        type: string
+        default: "us"
+      deeperCityScrape:
+        required: false
+        type: string
+        default: "true"
+      language:
+        required: false
+        type: string
+        default: "en"
+      skipClosedPlaces:
+        required: false
+        type: string
+        default: "true"
+      searchMatching:
+        required: false
+        type: string
+        default: "ALL"
+      placeMinimumStars:
+        required: false
+        type: string
+        default: "threeAndHalf"
+      website:
+        required: false
+        type: string
+        default: "require"
       locationQuery:
         required: true
         type: string
@@ -14,6 +41,7 @@ on:
       searchStringsArray:
         required: false
         type: string
+        default: "Christmas market"
 
 jobs:
   scrape-and-return:
