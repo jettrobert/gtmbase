@@ -3,8 +3,44 @@ name: Run Apify Scraper and Send to Clay
 on:
   workflow_dispatch:
     inputs:
-      scraper_input:
-        description: "JSON input for Apify actor"
+      countryCode:
+        description: "Country code (e.g., us)"
+        required: true
+        type: string
+      deeperCityScrape:
+        description: "Enable deeper city scrape"
+        required: true
+        type: boolean
+      language:
+        description: "Language code (e.g., en)"
+        required: true
+        type: string
+      locationQuery:
+        description: "Location query (e.g., Tennessee, us)"
+        required: true
+        type: string
+      maxCrawledPlacesPerSearch:
+        description: "Max crawled places per search"
+        required: true
+        type: string
+      searchStringsArray:
+        description: "Comma-separated search strings"
+        required: true
+        type: string
+      skipClosedPlaces:
+        description: "Skip closed places"
+        required: true
+        type: boolean
+      searchMatching:
+        description: "Search matching mode (all / any)"
+        required: true
+        type: string
+      placeMinimumStars:
+        description: "Minimum stars"
+        required: true
+        type: string
+      website:
+        description: "Website filter"
         required: true
         type: string
 
@@ -20,12 +56,38 @@ jobs:
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
-          INPUT_JSON: ${{ github.event.inputs.scraper_input }}
+
+          COUNTRY_CODE: ${{ github.event.inputs.countryCode }}
+          DEEPER_CITY: ${{ github.event.inputs.deeperCityScrape }}
+          LANGUAGE: ${{ github.event.inputs.language }}
+          LOCATION: ${{ github.event.inputs.locationQuery }}
+          MAX_PLACES: ${{ github.event.inputs.maxCrawledPlacesPerSearch }}
+          SEARCH_STRINGS: ${{ github.event.inputs.searchStringsArray }}
+          SKIP_CLOSED: ${{ github.event.inputs.skipClosedPlaces }}
+          SEARCH_MATCHING: ${{ github.event.inputs.searchMatching }}
+          MIN_STARS: ${{ github.event.inputs.placeMinimumStars }}
+          WEBSITE_FILTER: ${{ github.event.inputs.website }}
+
         run: |
           echo "📡 Starting Apify scrape..."
 
-          # Create temp file for JSON input
-          echo "$INPUT_JSON" > input.json
+          # Convert INPUTS → JSON → input.json
+          cat <<EOF > input.json
+{
+  "countryCode": "${COUNTRY_CODE}",
+  "deeperCityScrape": ${DEEPER_CITY},
+  "language": "${LANGUAGE}",
+  "locationQuery": "${LOCATION}",
+  "maxCrawledPlacesPerSearch": ${MAX_PLACES},
+  "searchStringsArray": ["${SEARCH_STRINGS}"],
+  "skipClosedPlaces": ${SKIP_CLOSED},
+  "searchMatching": "${SEARCH_MATCHING}",
+  "placeMinimumStars": "${MIN_STARS}",
+  "website": "${WEBSITE_FILTER}"
+}
+EOF
+
+          echo "📝 Generated input.json:"
           cat input.json
 
           echo "🚀 Triggering Apify actor..."
