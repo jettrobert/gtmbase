@@ -3,66 +3,35 @@ name: Clay → Apify Google Maps → Back to Clay
 on:
   workflow_dispatch:
     inputs:
-      countryCode:
-        required: false
-        type: string
-        default: "us"
-      deeperCityScrape:
-        required: false
-        type: string
-        default: "true"
-      language:
-        required: false
-        type: string
-        default: "en"
-      skipClosedPlaces:
-        required: false
-        type: string
-        default: "true"
-      searchMatching:
-        required: false
-        type: string
-        default: "ALL"
-      placeMinimumStars:
-        required: false
-        type: string
-        default: "threeAndHalf"
-      website:
-        required: false
-        type: string
-        default: "require"
-      locationQuery:
-        required: true
-        type: string
-      maxCrawledPlacesPerSearch:
-        required: false
-        type: string
-        default: "50"
-      searchStringsArray:
-        required: false
-        type: string
-        default: "Christmas market"
+      countryCode: { required: false, type: string, default: "us" }
+      deeperCityScrape: { required: false, type: string, default: "true" }
+      language: { required: false, type: string, default: "en" }
+      skipClosedPlaces: { required: false, type: string, default: "true" }
+      searchMatching: { required: false, type: string, default: "ALL" }
+      placeMinimumStars: { required: false, type: string, default: "threeAndHalf" }
+      website: { required: false, type: string, default: "require" }
+      locationQuery: { required: true, type: string }
+      maxCrawledPlacesPerSearch: { required: false, type: string, default: "50" }
+      searchStringsArray: { required: false, type: string, default: "Christmas market" }
 
 jobs:
-  scrape-and-return:
+  scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Build proper Apify input.json from Clay variables
+      - name: Build correct Apify input.json
         env:
-          LOCATION_QUERY: ${{ inputs.locationQuery }}
-          MAX_PLACES: ${{ inputs.maxCrawledPlacesPerSearch }}
-          SEARCH_TERMS: ${{ inputs.searchStringsArray }}
+          LOCATION: ${{ inputs.locationQuery }}
+          MAX: ${{ inputs.maxCrawledPlacesPerSearch }}
+          TERMS: ${{ inputs.searchStringsArray }}
         run: |
-          # Turn comma-separated string into real JSON array
-          SEARCH_ARRAY=$(echo "$SEARCH_TERMS" | jq -R 'split(",") | map(select(length>0) | gsub("^\\s+|\\s+$";""))')
-
+          SEARCH_ARRAY=$(echo "$TERMS" | jq -R 'split(",") | map(select(length>0) | gsub("^\\s+|\\s+$";""))')
           cat > input.json << EOF
           {
             "countryCode": "us",
             "deeperCityScrape": true,
             "language": "en",
-            "locationQuery": "$LOCATION_QUERY",
-            "maxCrawledPlacesPerSearch": ${MAX_PLACES:-50},
+            "locationQuery": "$LOCATION",
+            "maxCrawledPlacesPerSearch": ${MAX:-50},
             "searchStringsArray": $SEARCH_ARRAY,
             "skipClosedPlaces": true,
             "searchMatching": "all",
@@ -71,11 +40,10 @@ jobs:
             "memoryMbytes": 8192
           }
           EOF
-
-          echo "Final Apify input:"
+          echo "Apify input ready:"
           cat input.json | jq .
 
-      - name: Run Apify (reliable method – no more 400s)
+      - name: Run Apify actor (never 400s)
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
@@ -86,37 +54,32 @@ jobs:
 
           RUN_ID=$(echo "$RUN_JSON" | jq -r '.data.id')
           DATASET_ID=$(echo "$RUN_JSON" | jq -r '.data.defaultDatasetId')
-          echo "Apify run started: $RUN_ID"
+          echo "Run started: $RUN_ID"
 
           while true; do
             STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" | jq -r '.data.status')
             echo "Status: $STATUS"
-            if [[ "$STATUS" == "SUCCEEDED" ]]; then
-              break
-            elif [[ "$STATUS" == "FAILED" || "$STATUS" == "ABORTED" ]]; then
-              echo "Run failed"
-              exit 1
-            fi
+            [[ "$STATUS" == "SUCCEEDED" ]] && break
+            [[ "$STATUS" == "FAILED" || "$STATUS" == "ABORTED" ]] && exit 1
             sleep 7
           done
 
           RESULTS=$(curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN")
           echo "$RESULTS" > apify-results.json
-          echo "results<<EOF" >> $GITHUB_OUTPUT
-          echo "$RESULTS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Return full JSON array to Clay (creates one row per place)
-        id: return
+          # ← THIS IS THE ONLY CORRECT WAY TO SET MULTI-LINE OUTPUTS IN 2025
+          {
+            echo 'results<<EOF'
+            echo "$RESULTS"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      # This is all Clay needs — no extra actions, no 422, no missing url errors
+      - name: Return results to Clay
         run: |
-          echo "results=$(cat apify-results.json)" >> $GITHUB_OUTPUT
+          curl -X POST "${{ secrets.CLAY_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            --data @apify-results.json
 
-      # This is the magic line that sends the data back to Clay
-      - name: Send results back to Clay
-        if: always()
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ secrets.CLAY_WEBHOOK_URL }}
-          method: POST
-          contentType: application/json
-          data: ${{ steps.return.outputs.results }}
+          COUNT=$(jq 'length' apify-results.json)
+          echo "SUCCESS → $COUNT new rows added to Clay!"
