@@ -10,41 +10,35 @@ on:
       deeperCityScrape:
         type: boolean
         default: false
-        required: true
       language:
         type: string
         default: en
-        required: true
       locationQuery:
         type: string
         required: true
-        description: "e.g. Berlin, Germany or Austin, TX"
+        description: "e.g. Berlin, Germany"
       maxCrawledPlacesPerSearch:
         type: string
         default: "100"
-        required: true
       searchStringsArray:
         type: string
         required: true
-        description: "Comma-separated, e.g. dentist,orthodontist,dental clinic"
+        description: "Comma-separated, e.g. dentist,orthodontist"
       skipClosedPlaces:
         type: boolean
         default: true
-        required: true
       searchMatching:
         type: choice
         options: [ANY, ALL]
         default: ANY
-        required: true
       placeMinimumStars:
         type: string
         default: "0"
-        description: "Minimum rating, e.g. 4.0"
+        description: "Minimum rating as string, e.g. 4.0 or 4.5"
       website:
         type: choice
         options: ["", require, prefer]
         default: ""
-        description: "Filter places with website"
 
 jobs:
   scrape:
@@ -52,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare search strings array & build input.json
+      - name: Build input.json (with proper JSON types)
         env:
           COUNTRY_CODE: ${{ inputs.countryCode }}
           DEEPER_CITY: ${{ inputs.deeperCityScrape }}
@@ -62,12 +56,12 @@ jobs:
           SEARCH_STRINGS: ${{ inputs.searchStringsArray }}
           SKIP_CLOSED: ${{ inputs.skipClosedPlaces }}
           SEARCH_MATCHING: ${{ inputs.searchMatching }}
-          MIN_STARS: ${{ inputs.placeMinimumStars }}
+          MIN_STARS: ${{ inputs.placeMinimumStars }}   # ← kept as string
           WEBSITE_FILTER: ${{ inputs.website }}
         run: |
-          # Properly split comma-separated string into a real JSON array
-          IFS=',' read -ra SEARCH_ARRAY <<< "$SEARCH_STRINGS"
-          SEARCH_JSON=$(printf '%s\n' "${SEARCH_ARRAY[@]}" | jq -R . | jq -s -c .)
+          # Split search strings into real JSON array
+          IFS=',' read -ra ARR <<< "$SEARCH_STRINGS"
+          SEARCH_JSON=$(printf '%s\n' "${ARR[@]}" | jq -R . | jq -s -c .)
 
           cat << EOF > input.json
           {
@@ -75,47 +69,42 @@ jobs:
             "deeperCityScrape": $DEEPER_CITY,
             "language": "$LANGUAGE",
             "locationQuery": "$LOCATION",
-            "maxCrawledPlacesPerSearch": $MAX_PLACES,
+            "maxCrawledPlacesPerSearch": $(echo "$MAX_PLACES" | jq -R .),
             "searchStringsArray": $SEARCH_JSON,
             "skipClosedPlaces": $SKIP_CLOSED,
             "searchMatching": "$SEARCH_MATCHING",
-            "placeMinimumStars": ${MIN_STARS:-0},
+            "placeMinimumStars": "$MIN_STARS",
             "website": "$WEBSITE_FILTER"
           }
           EOF
 
           echo "Generated input.json:"
-          cat input.json | jq .
+          jq . input.json
 
-      - name: Run Apify Google Maps Extractor (sync)
+      - name: Run Apify Google Maps Extractor
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
-          echo "Calling Apify Google Maps Extractor..."
+          echo "Calling Apify (sync mode)..."
           curl -s -X POST \
             "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=8192" \
             -H "Content-Type: application/json" \
             --data @input.json \
             -o results.json
 
-          RESULT_COUNT=$(jq '. | length' results.json)
-          echo "Apify returned $RESULT_COUNT places"
+          COUNT=$(jq '. | length' results.json)
+          echo "Apify returned $COUNT places"
 
-          if [ "$RESULT_COUNT" -eq 0 ]; then
-            echo "No results returned – check your search parameters"
-            exit 1
-          fi
+          [ "$COUNT" -eq 0 ] && echo "No results – check your filters" && exit 1
 
-      - name: Send results to Clay
+      - name: Send to Clay
         env:
           CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
         run: |
-          echo "Sending $(jq '. | length' results.json) rows to Clay..."
+          echo "Sending $COUNT rows to Clay..."
           curl -X POST "$CLAY_WEBHOOK" \
             -H "Content-Type: application/json" \
             --data @results.json
 
-          # Gentle delay so Clay can breathe if payload is huge
           sleep 2
-
-          echo "All done! Leads are now in your Clay table."
+          echo "All done – leads are in Clay!"
