@@ -66,7 +66,7 @@ jobs:
 
       - name: Send results back to Clay
         env:
-          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK_URL }}
+          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK }}
         run: |
           if [[ -z "$CLAY_WEBHOOK_URL" ]]; then
             echo "ERROR: CLAY_WEBHOOK_URL secret is missing or empty"
