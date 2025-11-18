@@ -1,4 +1,4 @@
-name: Clay → Apify → Clay
+name: Clay → Apify → Clay (scalable + minimal payload)
 
 on:
   workflow_dispatch:
@@ -15,8 +15,12 @@ on:
       searchStringsArray: { type: string, default: "Christmas market" }
 
 jobs:
-  run-apify:
+  scrape:
     runs-on: ubuntu-latest
+    env:
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK_URL }}
+
     steps:
       - name: Create Apify input.json
         env:
@@ -41,9 +45,7 @@ jobs:
           }
           EOF
 
-      - name: Start and wait for Apify run
-        env:
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      - name: Run Apify actor
         run: |
           RUN_JSON=$(curl -s -X POST \
             "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN" \
@@ -62,20 +64,46 @@ jobs:
           done
 
           curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN" \
-            > apify-results.json
+            > full-results.json
 
-      - name: Send results back to Clay
-        env:
-          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK }}
+      - name: Send minimal fields to Clay in safe batches (supports 1000+)
         run: |
-          if [[ -z "$CLAY_WEBHOOK_URL" ]]; then
-            echo "ERROR: CLAY_WEBHOOK_URL secret is missing or empty"
-            exit 1
-          fi
+          jq 'map({
+            title,
+            url,
+            placeId,
+            categoryName,
+            website,
+            cid,
+            address,
+            street,
+            city,
+            postalCode,
+            state,
+            phone,
+            reviewsCount,
+            totalScore,
+            price,
+            permanentlyClosed,
+            openingHours,
+            scrapedAt
+          })' full-results.json > minimal.json
 
-          curl -X POST "$CLAY_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            --data @apify-results.json
+          TOTAL=$(jq 'length' minimal.json)
+          echo "Sending $TOTAL places (only required fields) in batches of 60…"
 
-          COUNT=$(jq 'length' apify-results.json)
-          echo "SUCCESS → $COUNT rows added to Clay"
+          jq -c '.[]' minimal.json | split -l 60 - batch_
+
+          SENT=0
+          for file in batch_*; do
+            jq -s . "$file" > payload.json
+            curl -X POST "$CLAY_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              --data @payload.json
+            SENT=$((SENT + $(jq 'length' payload.json)))
+            echo "Sent batch → $SENT/$TOTAL"
+            rm "$file" payload.json
+            sleep 0.8
+          done
+
+          echo "SUCCESS → All $TOTAL rows added to Clay"
