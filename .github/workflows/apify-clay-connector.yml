@@ -16,14 +16,14 @@ on:
       locationQuery:
         type: string
         required: true
-        description: "e.g. Berlin, Germany"
+        description: "e.g. Berlin, Germany or Miami, FL"
       maxCrawledPlacesPerSearch:
         type: string
         default: "100"
       searchStringsArray:
         type: string
         required: true
-        description: "Comma-separated, e.g. dentist,orthodontist"
+        description: "Comma-separated, e.g. dentist,orthodontist,dental clinic"
       skipClosedPlaces:
         type: boolean
         default: true
@@ -32,9 +32,21 @@ on:
         options: [ANY, ALL]
         default: ANY
       placeMinimumStars:
-        type: string
-        default: "0"
-        description: "Minimum rating as string, e.g. 4.0 or 4.5"
+        type: choice
+        description: "Minimum Google rating filter (Apify format)"
+        options:
+          - ""
+          - one
+          - oneAndHalf
+          - two
+          - twoAndHalf
+          - three
+          - threeAndHalf
+          - four
+          - fourAndHalf
+          - fourAndThreeQuarters
+          - five
+        default: ""
       website:
         type: choice
         options: ["", require, prefer]
@@ -46,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build input.json (with proper JSON types)
+      - name: Build correct input.json (with proper placeMinimumStars string)
         env:
           COUNTRY_CODE: ${{ inputs.countryCode }}
           DEEPER_CITY: ${{ inputs.deeperCityScrape }}
@@ -56,20 +68,21 @@ jobs:
           SEARCH_STRINGS: ${{ inputs.searchStringsArray }}
           SKIP_CLOSED: ${{ inputs.skipClosedPlaces }}
           SEARCH_MATCHING: ${{ inputs.searchMatching }}
-          MIN_STARS: ${{ inputs.placeMinimumStars }}   # ← kept as string
+          MIN_STARS: ${{ inputs.placeMinimumStars }}
           WEBSITE_FILTER: ${{ inputs.website }}
         run: |
           # Split search strings into real JSON array
           IFS=',' read -ra ARR <<< "$SEARCH_STRINGS"
           SEARCH_JSON=$(printf '%s\n' "${ARR[@]}" | jq -R . | jq -s -c .)
 
+          # Build JSON – note MIN_STARS is already the correct string like "fourAndHalf"
           cat << EOF > input.json
           {
             "countryCode": "$COUNTRY_CODE",
             "deeperCityScrape": $DEEPER_CITY,
             "language": "$LANGUAGE",
             "locationQuery": "$LOCATION",
-            "maxCrawledPlacesPerSearch": $(echo "$MAX_PLACES" | jq -R .),
+            "maxCrawledPlacesPerSearch": $MAX_PLACES,
             "searchStringsArray": $SEARCH_JSON,
             "skipClosedPlaces": $SKIP_CLOSED,
             "searchMatching": "$SEARCH_MATCHING",
@@ -79,32 +92,32 @@ jobs:
           EOF
 
           echo "Generated input.json:"
-          jq . input.json
+          cat input.json | jq .
 
       - name: Run Apify Google Maps Extractor
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
-          echo "Calling Apify (sync mode)..."
-          curl -s -X POST \
+          echo "Starting Apify run..."
+          curl -f -X POST \
             "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=8192" \
             -H "Content-Type: application/json" \
             --data @input.json \
-            -o results.json
+            -o results.json || { echo "Apify request failed"; exit 1; }
 
           COUNT=$(jq '. | length' results.json)
-          echo "Apify returned $COUNT places"
+          echo "Successfully scraped $COUNT places"
 
-          [ "$COUNT" -eq 0 ] && echo "No results – check your filters" && exit 1
+          [ "$COUNT" -eq 0 ] && echo "Warning: No places found – try broadening your filters" || echo "Results ready to send"
 
       - name: Send to Clay
         env:
           CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
         run: |
-          echo "Sending $COUNT rows to Clay..."
+          echo "Pushing $(jq '. | length' results.json) rows to Clay..."
           curl -X POST "$CLAY_WEBHOOK" \
             -H "Content-Type: application/json" \
             --data @results.json
 
           sleep 2
-          echo "All done – leads are in Clay!"
+          echo "All leads are now in your Clay table!"
