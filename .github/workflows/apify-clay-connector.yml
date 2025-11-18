@@ -50,8 +50,11 @@ on:
         default: ""
       website:
         type: choice
-        options: ["", require, prefer]
-        default: ""
+        options: 
+          - allPlaces 
+          - withWebsite
+          - withoutWebsite
+        default: allPlaces
 
 jobs:
   scrape-and-send:
