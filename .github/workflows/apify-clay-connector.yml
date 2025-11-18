@@ -1,26 +1,26 @@
-name: Clay → Apify Google Maps → Back to Clay
+name: Clay → Apify → Clay
 
 on:
   workflow_dispatch:
     inputs:
-      countryCode: { required: false, type: string, default: "us" }
-      deeperCityScrape: { required: false, type: string, default: "true" }
-      language: { required: false, type: string, default: "en" }
-      skipClosedPlaces: { required: false, type: string, default: "true" }
-      searchMatching: { required: false, type: string, default: "ALL" }
-      placeMinimumStars: { required: false, type: string, default: "threeAndHalf" }
-      website: { required: false, type: string, default: "require" }
-      locationQuery: { required: true, type: string }
-      maxCrawledPlacesPerSearch: { required: false, type: string, default: "50" }
-      searchStringsArray: { required: false, type: string, default: "Christmas market" }
+      countryCode: { type: string, default: "us" }
+      deeperCityScrape: { type: string, default: "true" }
+      language: { type: string, default: "en" }
+      skipClosedPlaces: { type: string, default: "true" }
+      searchMatching: { type: string, default: "ALL" }
+      placeMinimumStars: { type: string, default: "threeAndHalf" }
+      website: { type: string, default: "require" }
+      locationQuery: { type: string, required: true }
+      maxCrawledPlacesPerSearch: { type: string, default: "50" }
+      searchStringsArray: { type: string, default: "Christmas market" }
 
 jobs:
-  scrape:
+  run-apify:
     runs-on: ubuntu-latest
     steps:
-      - name: Build correct Apify input.json
+      - name: Create Apify input.json
         env:
-          LOCATION: ${{ inputs.locationQuery }}
+          LOC: ${{ inputs.locationQuery }}
           MAX: ${{ inputs.maxCrawledPlacesPerSearch }}
           TERMS: ${{ inputs.searchStringsArray }}
         run: |
@@ -30,7 +30,7 @@ jobs:
             "countryCode": "us",
             "deeperCityScrape": true,
             "language": "en",
-            "locationQuery": "$LOCATION",
+            "locationQuery": "$LOC",
             "maxCrawledPlacesPerSearch": ${MAX:-50},
             "searchStringsArray": $SEARCH_ARRAY,
             "skipClosedPlaces": true,
@@ -40,10 +40,8 @@ jobs:
             "memoryMbytes": 8192
           }
           EOF
-          echo "Apify input ready:"
-          cat input.json | jq .
 
-      - name: Run Apify actor (never 400s)
+      - name: Start and wait for Apify run
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
@@ -54,7 +52,6 @@ jobs:
 
           RUN_ID=$(echo "$RUN_JSON" | jq -r '.data.id')
           DATASET_ID=$(echo "$RUN_JSON" | jq -r '.data.defaultDatasetId')
-          echo "Run started: $RUN_ID"
 
           while true; do
             STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" | jq -r '.data.status')
@@ -64,22 +61,21 @@ jobs:
             sleep 7
           done
 
-          RESULTS=$(curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN")
-          echo "$RESULTS" > apify-results.json
+          curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN" \
+            > apify-results.json
 
-          # ← THIS IS THE ONLY CORRECT WAY TO SET MULTI-LINE OUTPUTS IN 2025
-          {
-            echo 'results<<EOF'
-            echo "$RESULTS"
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
-
-      # This is all Clay needs — no extra actions, no 422, no missing url errors
-      - name: Return results to Clay
+      - name: Send results back to Clay
+        env:
+          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK_URL }}
         run: |
-          curl -X POST "${{ secrets.CLAY_WEBHOOK_URL }}" \
+          if [[ -z "$CLAY_WEBHOOK_URL" ]]; then
+            echo "ERROR: CLAY_WEBHOOK_URL secret is missing or empty"
+            exit 1
+          fi
+
+          curl -X POST "$CLAY_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             --data @apify-results.json
 
           COUNT=$(jq 'length' apify-results.json)
-          echo "SUCCESS → $COUNT new rows added to Clay!"
+          echo "SUCCESS → $COUNT rows added to Clay"
