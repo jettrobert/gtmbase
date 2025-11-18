@@ -4,105 +4,118 @@ on:
   workflow_dispatch:
     inputs:
       countryCode:
-        description: "Country code (e.g., us)"
-        required: true
         type: string
+        required: true
+        description: "e.g. US, DE, FR"
       deeperCityScrape:
-        description: "Enable deeper city scrape"
-        required: true
         type: boolean
+        default: false
+        required: true
       language:
-        description: "Language code (e.g., en)"
-        required: true
         type: string
+        default: en
+        required: true
       locationQuery:
-        description: "Location query (e.g., Tennessee, us)"
-        required: true
         type: string
+        required: true
+        description: "e.g. Berlin, Germany or Austin, TX"
       maxCrawledPlacesPerSearch:
-        description: "Max crawled places per search"
-        required: true
         type: string
+        default: "100"
+        required: true
       searchStringsArray:
-        description: "Comma-separated search strings"
-        required: true
         type: string
+        required: true
+        description: "Comma-separated, e.g. dentist,orthodontist,dental clinic"
       skipClosedPlaces:
-        description: "Skip closed places"
-        required: true
         type: boolean
+        default: true
+        required: true
       searchMatching:
-        description: "Search matching mode (all / any)"
+        type: choice
+        options: [ANY, ALL]
+        default: ANY
         required: true
-        type: string
       placeMinimumStars:
-        description: "Minimum stars"
-        required: true
         type: string
+        default: "0"
+        description: "Minimum rating, e.g. 4.0"
       website:
-        description: "Website filter"
-        required: true
-        type: string
+        type: choice
+        options: ["", require, prefer]
+        default: ""
+        description: "Filter places with website"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Run scraper
+      - name: Prepare search strings array & build input.json
+        env:
+          COUNTRY_CODE: ${{ inputs.countryCode }}
+          DEEPER_CITY: ${{ inputs.deeperCityScrape }}
+          LANGUAGE: ${{ inputs.language }}
+          LOCATION: ${{ inputs.locationQuery }}
+          MAX_PLACES: ${{ inputs.maxCrawledPlacesPerSearch }}
+          SEARCH_STRINGS: ${{ inputs.searchStringsArray }}
+          SKIP_CLOSED: ${{ inputs.skipClosedPlaces }}
+          SEARCH_MATCHING: ${{ inputs.searchMatching }}
+          MIN_STARS: ${{ inputs.placeMinimumStars }}
+          WEBSITE_FILTER: ${{ inputs.website }}
+        run: |
+          # Properly split comma-separated string into a real JSON array
+          IFS=',' read -ra SEARCH_ARRAY <<< "$SEARCH_STRINGS"
+          SEARCH_JSON=$(printf '%s\n' "${SEARCH_ARRAY[@]}" | jq -R . | jq -s -c .)
+
+          cat << EOF > input.json
+          {
+            "countryCode": "$COUNTRY_CODE",
+            "deeperCityScrape": $DEEPER_CITY,
+            "language": "$LANGUAGE",
+            "locationQuery": "$LOCATION",
+            "maxCrawledPlacesPerSearch": $MAX_PLACES,
+            "searchStringsArray": $SEARCH_JSON,
+            "skipClosedPlaces": $SKIP_CLOSED,
+            "searchMatching": "$SEARCH_MATCHING",
+            "placeMinimumStars": ${MIN_STARS:-0},
+            "website": "$WEBSITE_FILTER"
+          }
+          EOF
+
+          echo "Generated input.json:"
+          cat input.json | jq .
+
+      - name: Run Apify Google Maps Extractor (sync)
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-          CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
-
-          COUNTRY_CODE: ${{ github.event.inputs.countryCode }}
-          DEEPER_CITY: ${{ github.event.inputs.deeperCityScrape }}
-          LANGUAGE: ${{ github.event.inputs.language }}
-          LOCATION: ${{ github.event.inputs.locationQuery }}
-          MAX_PLACES: ${{ github.event.inputs.maxCrawledPlacesPerSearch }}
-          SEARCH_STRINGS: ${{ github.event.inputs.searchStringsArray }}
-          SKIP_CLOSED: ${{ github.event.inputs.skipClosedPlaces }}
-          SEARCH_MATCHING: ${{ github.event.inputs.searchMatching }}
-          MIN_STARS: ${{ github.event.inputs.placeMinimumStars }}
-          WEBSITE_FILTER: ${{ github.event.inputs.website }}
-
         run: |
-          echo "📡 Starting Apify scrape..."
-
-          # Convert INPUTS → JSON → input.json
-          cat <<EOF > input.json
-{
-  "countryCode": "${COUNTRY_CODE}",
-  "deeperCityScrape": ${DEEPER_CITY},
-  "language": "${LANGUAGE}",
-  "locationQuery": "${LOCATION}",
-  "maxCrawledPlacesPerSearch": ${MAX_PLACES},
-  "searchStringsArray": ["${SEARCH_STRINGS}"],
-  "skipClosedPlaces": ${SKIP_CLOSED},
-  "searchMatching": "${SEARCH_MATCHING}",
-  "placeMinimumStars": "${MIN_STARS}",
-  "website": "${WEBSITE_FILTER}"
-}
-EOF
-
-          echo "📝 Generated input.json:"
-          cat input.json
-
-          echo "🚀 Triggering Apify actor..."
+          echo "Calling Apify Google Maps Extractor..."
           curl -s -X POST \
-            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=4096" \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=8192" \
             -H "Content-Type: application/json" \
             --data @input.json \
             -o results.json
 
-          echo "📥 Apify results:"
-          cat results.json
+          RESULT_COUNT=$(jq '. | length' results.json)
+          echo "Apify returned $RESULT_COUNT places"
 
-          echo "📤 Sending results to Clay webhook..."
-          curl -s -X POST "$CLAY_WEBHOOK" \
+          if [ "$RESULT_COUNT" -eq 0 ]; then
+            echo "No results returned – check your search parameters"
+            exit 1
+          fi
+
+      - name: Send results to Clay
+        env:
+          CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
+        run: |
+          echo "Sending $(jq '. | length' results.json) rows to Clay..."
+          curl -X POST "$CLAY_WEBHOOK" \
             -H "Content-Type: application/json" \
             --data @results.json
 
-          echo "🎉 Done!"
+          # Gentle delay so Clay can breathe if payload is huge
+          sleep 2
+
+          echo "All done! Leads are now in your Clay table."
