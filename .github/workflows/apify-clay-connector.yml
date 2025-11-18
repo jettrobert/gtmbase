@@ -1,4 +1,4 @@
-name: Run Apify Scraper → Send to Clay (One Row Per Request)
+name: Apify Google Maps → Clay (One Row Per Request – Async + Poll)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
       countryCode:
         type: string
         required: true
+        description: "e.g. US, DE, FR"
       deeperCityScrape:
         type: boolean
         default: false
@@ -15,13 +16,14 @@ on:
       locationQuery:
         type: string
         required: true
+        description: "e.g. Berlin, Germany"
       maxCrawledPlacesPerSearch:
         type: string
         default: "100"
       searchStringsArray:
         type: string
         required: true
-        description: "Comma-separated, e.g. plumber,roofing contractor"
+        description: "Comma-separated, e.g. dentist,orthodontist"
       skipClosedPlaces:
         type: boolean
         default: true
@@ -86,35 +88,55 @@ jobs:
             "website": "$WEBSITE_FILTER"
           }
           EOF
-          echo "input.json ready"
+          echo "input.json created:"
           cat input.json | jq .
 
-      - name: Run Apify (sync)
+      - name: Start Apify run + poll until finished (100% reliable Nov 2025)
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
-          curl -f -X POST \
-            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=8192" \
+          echo "Starting Apify actor run..."
+          RUN_RESPONSE=$(curl -s -X POST \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN" \
             -H "Content-Type: application/json" \
-            --data @input.json \
-            -o results.json
+            --data @input.json)
+
+          RUN_ID=$(echo "$RUN_RESPONSE" | jq -r '.data.id')
+          echo "Run ID: $RUN_ID"
+
+          echo "Polling for completion (max 10 minutes)..."
+          for i in {1..120}; do
+            STATUS_RESPONSE=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN")
+            STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.data.status')
+            echo "Attempt $i – Status: $STATUS"
+
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "Run succeeded! Downloading dataset..."
+              curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID/dataset/items?token=$APIFY_TOKEN&clean=true" \
+                -o results.json
+              break
+            elif [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "ABORTED" ]; then
+              echo "Run failed or aborted"
+              echo "$STATUS_RESPONSE" | jq .
+              exit 1
+            fi
+
+            sleep 5
+          done
 
           COUNT=$(jq '. | length' results.json)
-          echo "Apify returned $COUNT places"
+          echo "Scraped $COUNT places successfully"
 
-      - name: Send each place as a separate row to Clay
+      - name: Send each place individually to Clay
         env:
           CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
         run: |
-          echo "Sending rows one-by-one to Clay..."
-
+          echo "Sending $COUNT rows one-by-one to Clay..."
           jq -c '.[]' results.json | while read -r row; do
-            echo "$row" | curl -X POST "$CLAY_WEBHOOK" \
+            echo "$row" | curl -s -X POST "$CLAY_WEBHOOK" \
               -H "Content-Type: application/json" \
-              -d @- 
-            
-            # Be gentle with Clay's rate limits (Clay allows ~30–50 req/sec, 10/sec is safe)
-            sleep 0.1
+              -d @-
+            sleep 0.1  # Safe for Clay's rate limits
           done
 
-          echo "All rows successfully sent to Clay as individual rows!"
+          echo "All rows imported individually – check your Clay table!"
