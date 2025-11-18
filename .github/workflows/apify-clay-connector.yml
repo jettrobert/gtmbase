@@ -30,8 +30,8 @@ on:
         default: true
       searchMatching:
         type: choice
-        options: [ANY, ALL]
-        default: ANY
+        options: [all, only_includes, only_exact]
+        default: all
       placeMinimumStars:
         type: choice
         description: "Minimum rating (leave empty for no filter)"
