@@ -1,123 +1,55 @@
-name: Run Apify Scraper and Send to Clay
+name: Apify → Clay (Google Maps → Rows)
 
 on:
-  workflow_dispatch:
-    inputs:
-      countryCode:
-        type: string
-        required: true
-        description: "e.g. US, DE, FR"
-      deeperCityScrape:
-        type: boolean
-        default: false
-      language:
-        type: string
-        default: en
-      locationQuery:
-        type: string
-        required: true
-        description: "e.g. Berlin, Germany or Miami, FL"
-      maxCrawledPlacesPerSearch:
-        type: string
-        default: "100"
-      searchStringsArray:
-        type: string
-        required: true
-        description: "Comma-separated, e.g. dentist,orthodontist,dental clinic"
-      skipClosedPlaces:
-        type: boolean
-        default: true
-      searchMatching:
-        type: choice
-        options: [ANY, ALL]
-        default: ANY
-      placeMinimumStars:
-        type: choice
-        description: "Minimum Google rating filter (Apify format)"
-        options:
-          - ""
-          - one
-          - oneAndHalf
-          - two
-          - twoAndHalf
-          - three
-          - threeAndHalf
-          - four
-          - fourAndHalf
-          - fourAndThreeQuarters
-          - five
-        default: ""
-      website:
-        type: choice
-        options: ["", require, prefer]
-        default: ""
+  workflow_dispatch:   # or schedule:, push:, etc.
 
 jobs:
-  scrape:
+  scrape-to-clay:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4   # only needed if you have input.json in the repo
 
-      - name: Build correct input.json (with proper placeMinimumStars string)
-        env:
-          COUNTRY_CODE: ${{ inputs.countryCode }}
-          DEEPER_CITY: ${{ inputs.deeperCityScrape }}
-          LANGUAGE: ${{ inputs.language }}
-          LOCATION: ${{ inputs.locationQuery }}
-          MAX_PLACES: ${{ inputs.maxCrawledPlacesPerSearch }}
-          SEARCH_STRINGS: ${{ inputs.searchStringsArray }}
-          SKIP_CLOSED: ${{ inputs.skipClosedPlaces }}
-          SEARCH_MATCHING: ${{ inputs.searchMatching }}
-          MIN_STARS: ${{ inputs.placeMinimumStars }}
-          WEBSITE_FILTER: ${{ inputs.website }}
-        run: |
-          # Split search strings into real JSON array
-          IFS=',' read -ra ARR <<< "$SEARCH_STRINGS"
-          SEARCH_JSON=$(printf '%s\n' "${ARR[@]}" | jq -R . | jq -s -c .)
-
-          # Build JSON – note MIN_STARS is already the correct string like "fourAndHalf"
-          cat << EOF > input.json
-          {
-            "countryCode": "$COUNTRY_CODE",
-            "deeperCityScrape": $DEEPER_CITY,
-            "language": "$LANGUAGE",
-            "locationQuery": "$LOCATION",
-            "maxCrawledPlacesPerSearch": $MAX_PLACES,
-            "searchStringsArray": $SEARCH_JSON,
-            "skipClosedPlaces": $SKIP_CLOSED,
-            "searchMatching": "$SEARCH_MATCHING",
-            "placeMinimumStars": "$MIN_STARS",
-            "website": "$WEBSITE_FILTER"
-          }
-          EOF
-
-          echo "Generated input.json:"
-          cat input.json | jq .
-
-      - name: Run Apify Google Maps Extractor
+      - name: Run Apify → Send full JSON array to Clay
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK_URL }}   # ← already exists as secret
         run: |
-          echo "Starting Apify run..."
-          curl -f -X POST \
-            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync?token=$APIFY_TOKEN&memory=8192" \
+          echo "Starting Apify Google Maps scrape..."
+
+          # 1. Start the actor run
+          RUN_JSON=$(curl -s -X POST \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN&memory=8192" \
             -H "Content-Type: application/json" \
-            --data @input.json \
-            -o results.json || { echo "Apify request failed"; exit 1; }
+            --data @input.json)
 
-          COUNT=$(jq '. | length' results.json)
-          echo "Successfully scraped $COUNT places"
+          RUN_ID=$(echo "$RUN_JSON" | jq -r '.data.id')
+          DATASET_ID=$(echo "$RUN_JSON" | jq -r '.data.defaultDatasetId')
+          echo "Run started: $RUN_ID – waiting for it to finish..."
 
-          [ "$COUNT" -eq 0 ] && echo "Warning: No places found – try broadening your filters" || echo "Results ready to send"
+          # 2. Wait until SUCCEEDED
+          while true; do
+            STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" \
+                     | jq -r '.data.status')
+            echo "Status: $STATUS"
+            if [[ "$STATUS" == "SUCCEEDED" ]]; then
+              echo "Scrape complete!"
+              break
+            elif [[ "$STATUS" == "FAILED" || "$STATUS" == "ABORTED" ]]; then
+              echo "Run failed – check the log in Apify console"
+              exit 1
+            fi
+            sleep 7
+          done
 
-      - name: Send to Clay
-        env:
-          CLAY_WEBHOOK: ${{ secrets.CLAY_WEBHOOK }}
-        run: |
-          echo "Pushing $(jq '. | length' results.json) rows to Clay..."
-          curl -X POST "$CLAY_WEBHOOK" \
+          # 3. Download the full JSON results array
+          RESULTS_JSON=$(curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN")
+
+          COUNT=$(echo "$RESULTS_JSON" | jq 'length')
+          echo "Found $COUNT places – pushing to Clay..."
+
+          # 4. Send the entire array in ONE call → Clay creates one row per object
+          curl -X POST "$CLAY_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            --data @results.json
+            --data "$RESULTS_JSON"
 
-          sleep 2
-          echo "All leads are now in your Clay table!"
+          echo "Success! $COUNT new rows just landed in your Clay table 🚀"
