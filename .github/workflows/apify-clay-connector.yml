@@ -100,7 +100,7 @@ jobs:
         run: |
           echo "Starting Apify run..."
           curl -f -X POST \
-            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token=$APIFY_TOKEN&memory=8192" \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync?token=$APIFY_TOKEN&memory=8192" \
             -H "Content-Type: application/json" \
             --data @input.json \
             -o results.json || { echo "Apify request failed"; exit 1; }
