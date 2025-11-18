@@ -1,55 +1,94 @@
-name: Apify → Clay (Google Maps → Rows)
+name: Clay → Apify Google Maps → Back to Clay
 
+# This trigger is what Clay uses when you add "Run workflow" as an enrichment
 on:
-  workflow_dispatch:   # or schedule:, push:, etc.
+  workflow_dispatch:
+    inputs:
+      locationQuery:
+        required: true
+        type: string
+      maxCrawledPlacesPerSearch:
+        required: false
+        type: string
+        default: "50"
+      searchStringsArray:
+        required: false
+        type: string
 
 jobs:
-  scrape-to-clay:
+  scrape-and-return:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # only needed if you have input.json in the repo
+      - name: Build proper Apify input.json from Clay variables
+        env:
+          LOCATION_QUERY: ${{ inputs.locationQuery }}
+          MAX_PLACES: ${{ inputs.maxCrawledPlacesPerSearch }}
+          SEARCH_TERMS: ${{ inputs.searchStringsArray }}
+        run: |
+          # Turn comma-separated string into real JSON array
+          SEARCH_ARRAY=$(echo "$SEARCH_TERMS" | jq -R 'split(",") | map(select(length>0) | gsub("^\\s+|\\s+$";""))')
 
-      - name: Run Apify → Send full JSON array to Clay
+          cat > input.json << EOF
+          {
+            "countryCode": "us",
+            "deeperCityScrape": true,
+            "language": "en",
+            "locationQuery": "$LOCATION_QUERY",
+            "maxCrawledPlacesPerSearch": ${MAX_PLACES:-50},
+            "searchStringsArray": $SEARCH_ARRAY,
+            "skipClosedPlaces": true,
+            "searchMatching": "all",
+            "placeMinimumStars": "threeAndHalf",
+            "website": "withWebsite",
+            "memoryMbytes": 8192
+          }
+          EOF
+
+          echo "Final Apify input:"
+          cat input.json | jq .
+
+      - name: Run Apify (reliable method – no more 400s)
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK_URL }}   # ← already exists as secret
         run: |
-          echo "Starting Apify Google Maps scrape..."
-
-          # 1. Start the actor run
           RUN_JSON=$(curl -s -X POST \
-            "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN&memory=8192" \
+            "https://api.apify.com/v2/acts/compass~google-maps-extractor/runs?token=$APIFY_TOKEN" \
             -H "Content-Type: application/json" \
             --data @input.json)
 
           RUN_ID=$(echo "$RUN_JSON" | jq -r '.data.id')
           DATASET_ID=$(echo "$RUN_JSON" | jq -r '.data.defaultDatasetId')
-          echo "Run started: $RUN_ID – waiting for it to finish..."
+          echo "Apify run started: $RUN_ID"
 
-          # 2. Wait until SUCCEEDED
           while true; do
-            STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" \
-                     | jq -r '.data.status')
+            STATUS=$(curl -s "https://api.apify.com/v2/actor-runs/$RUN_ID?token=$APIFY_TOKEN" | jq -r '.data.status')
             echo "Status: $STATUS"
             if [[ "$STATUS" == "SUCCEEDED" ]]; then
-              echo "Scrape complete!"
               break
             elif [[ "$STATUS" == "FAILED" || "$STATUS" == "ABORTED" ]]; then
-              echo "Run failed – check the log in Apify console"
+              echo "Run failed"
               exit 1
             fi
             sleep 7
           done
 
-          # 3. Download the full JSON results array
-          RESULTS_JSON=$(curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN")
+          RESULTS=$(curl -s "https://api.apify.com/v2/datasets/$DATASET_ID/items?format=json&clean=1&token=$APIFY_TOKEN")
+          echo "$RESULTS" > apify-results.json
+          echo "results<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-          COUNT=$(echo "$RESULTS_JSON" | jq 'length')
-          echo "Found $COUNT places – pushing to Clay..."
+      - name: Return full JSON array to Clay (creates one row per place)
+        id: return
+        run: |
+          echo "results=$(cat apify-results.json)" >> $GITHUB_OUTPUT
 
-          # 4. Send the entire array in ONE call → Clay creates one row per object
-          curl -X POST "$CLAY_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            --data "$RESULTS_JSON"
-
-          echo "Success! $COUNT new rows just landed in your Clay table 🚀"
+      # This is the magic line that sends the data back to Clay
+      - name: Send results back to Clay
+        if: always()
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: ${{ secrets.CLAY_WEBHOOK_URL }}
+          method: POST
+          contentType: application/json
+          data: ${{ steps.return.outputs.results }}
