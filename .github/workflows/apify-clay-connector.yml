@@ -1,4 +1,4 @@
-name: Apify Google Maps → Clay (One Row Per Request – 100% Reliable Nov 2025)
+name: Apify Google Maps → Clay
 
 on:
   workflow_dispatch:
